@@ -20,8 +20,10 @@ main :: proc() {
 init_window :: proc() {
 	glfw.Init()
 	glfw.WindowHint(glfw.CLIENT_API, glfw.NO_API)
-	glfw.WindowHint(glfw.RESIZABLE, glfw.FALSE)
+	glfw.WindowHint(glfw.RESIZABLE, glfw.TRUE)
 	vr.window = glfw.CreateWindow(WIDTH, HEIGHT, "Vulkan", nil, nil)
+	/* glfw.SetWindowUserPointer(vr.window, this) */
+	glfw.SetFramebufferSizeCallback(vr.window, framebuffer_resize_callback)
 
 	if vr.window == nil {
 		glfw.Terminate()
@@ -46,7 +48,7 @@ init_vulkan :: proc() {
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
-	create_command_buffer()
+	create_command_buffers()
 	create_sync_objects()
 }
 
@@ -65,4 +67,10 @@ key_callback :: proc "c" (window: glfw.WindowHandle, key, scancode, action, mods
 	if key == glfw.KEY_ESCAPE && action == glfw.PRESS {
 		glfw.SetWindowShouldClose(window, glfw.TRUE)
 	}
+}
+
+
+framebuffer_resize_callback :: proc "c" (window: glfw.WindowHandle, width, height: i32) {
+	/* context := runtime.default_context() */
+	framebuffer_resized = true
 }

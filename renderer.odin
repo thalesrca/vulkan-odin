@@ -14,6 +14,7 @@ WIDTH :: 800
 HEIGHT :: 600
 
 MAX_FRAMES_IN_FLIGHT :: 2
+current_frame: u32 = 0
 
 VulkanRenderer :: struct {
 	window: glfw.WindowHandle,
@@ -34,15 +35,14 @@ VulkanRenderer :: struct {
 	pipeline_layout: vk.PipelineLayout,
 	graphics_pipeline: vk.Pipeline,
 	command_pool: vk.CommandPool,
-	command_buffer: vk.CommandBuffer,
-
-	image_available_semaphore: vk.Semaphore,
-	render_finished_semaphore: vk.Semaphore,
-	in_flight_fence: vk.Fence,
+	command_buffers: [dynamic]vk.CommandBuffer,
+	image_available_semaphores: [dynamic]vk.Semaphore,
+	render_finished_semaphores: [dynamic]vk.Semaphore,
+	in_flight_fences: [dynamic]vk.Fence,
 }
 
-
 vr: VulkanRenderer
+framebuffer_resized: b32 = false
 
 validation_layers := []cstring{
 	"VK_LAYER_KHRONOS_validation"
@@ -175,6 +175,10 @@ pick_physical_device :: proc() {
 
 
 create_sync_objects :: proc() {
+	resize(&vr.image_available_semaphores, MAX_FRAMES_IN_FLIGHT)
+	resize(&vr.render_finished_semaphores, MAX_FRAMES_IN_FLIGHT)
+	resize(&vr.in_flight_fences, MAX_FRAMES_IN_FLIGHT)
+	
 	semaphore_info: vk.SemaphoreCreateInfo
 	semaphore_info.sType = vk.StructureType.SEMAPHORE_CREATE_INFO
 
@@ -182,11 +186,14 @@ create_sync_objects :: proc() {
 	fence_info.sType = vk.StructureType.FENCE_CREATE_INFO
 	fence_info.flags = vk.FenceCreateFlags{.SIGNALED}
 
-	if  vk.CreateSemaphore(vr.device, &semaphore_info, nil, &vr.image_available_semaphore) != vk.Result.SUCCESS ||
-		vk.CreateSemaphore(vr.device, &semaphore_info, nil, &vr.render_finished_semaphore) != vk.Result.SUCCESS ||
-		vk.CreateFence(vr.device, &fence_info, nil, &vr.in_flight_fence) != vk.Result.SUCCESS {
-			fmt.println("Failed to create semaphores!")
-		}
+	for i := 0; i < MAX_FRAMES_IN_FLIGHT; i += 1 {
+		if  vk.CreateSemaphore(vr.device, &semaphore_info, nil, &vr.image_available_semaphores[i]) != vk.Result.SUCCESS ||
+			vk.CreateSemaphore(vr.device, &semaphore_info, nil, &vr.render_finished_semaphores[i]) != vk.Result.SUCCESS ||
+			vk.CreateFence(vr.device, &fence_info, nil, &vr.in_flight_fences[i]) != vk.Result.SUCCESS {
+				fmt.println("Failed to create semaphores!")
+			}		
+	}
+
 }
 
 
@@ -241,14 +248,15 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	}
 }
 
-create_command_buffer :: proc() {
+create_command_buffers :: proc() {
+	resize(&vr.command_buffers, MAX_FRAMES_IN_FLIGHT)
 	alloc_info :vk.CommandBufferAllocateInfo
 	alloc_info.sType = vk.StructureType.COMMAND_BUFFER_ALLOCATE_INFO
 	alloc_info.commandPool = vr.command_pool
 	alloc_info.level = vk.CommandBufferLevel.PRIMARY
-	alloc_info.commandBufferCount = 1
+	alloc_info.commandBufferCount = u32(len(vr.command_buffers))
 
-	if vk.AllocateCommandBuffers(vr.device, &alloc_info, &vr.command_buffer) != vk.Result.SUCCESS {
+	if vk.AllocateCommandBuffers(vr.device, &alloc_info, raw_data(vr.command_buffers)) != vk.Result.SUCCESS {
 		fmt.println("Failed to allocate command buffers!")
 	}
 }
@@ -548,6 +556,35 @@ setup_debug_messenger :: proc() {
 	/* } */
 }
 
+cleanup_swap_chain :: proc() {
+	for framebuffer in vr.swap_chain_framebuffers {
+		vk.DestroyFramebuffer(vr.device, framebuffer, nil)
+	}
+
+	
+	for image_view in vr.swap_chain_image_views {
+		vk.DestroyImageView(vr.device, image_view, nil)
+	}
+
+	vk.DestroySwapchainKHR(vr.device, vr.swap_chain, nil)
+}
+
+recreate_swap_chain :: proc() {
+	width, height := glfw.GetFramebufferSize(vr.window)
+
+	for width == 0 || height == 0 {
+		width, height = glfw.GetFramebufferSize(vr.window)
+		glfw.WaitEvents()
+	}
+	vk.DeviceWaitIdle(vr.device)
+
+	cleanup_swap_chain()
+
+	create_swap_chain()
+	create_image_views()
+	create_framebuffers()
+}
+
 create_swap_chain :: proc() {
 	swap_chain_support: SwapChainSupportDetails = query_swap_chain_support(vr.physical_device)
 	surface_format := choose_swap_surface_format(swap_chain_support.formats[:])
@@ -812,60 +849,77 @@ find_queue_families :: proc(p_device: vk.PhysicalDevice) -> QueueFamilyIndices {
 
 
 draw_frame :: proc () {
-	vk.WaitForFences(vr.device, 1, &vr.in_flight_fence, true, max(u64))
+	vk.WaitForFences(vr.device, 1, &vr.in_flight_fences[current_frame], true, max(u64))
+	vk.ResetFences(vr.device, 1, &vr.in_flight_fences[current_frame])
 
 	image_index: u32
-	vk.AcquireNextImageKHR(vr.device, vr.swap_chain, max(u64), vr.image_available_semaphore, 0, &image_index)
+	result := vk.AcquireNextImageKHR(vr.device, vr.swap_chain, max(u64), vr.image_available_semaphores[current_frame], 0, &image_index)
 
-	vk.ResetFences(vr.device, 1, &vr.in_flight_fence)
-	vk.ResetCommandBuffer(vr.command_buffer, vk.CommandBufferResetFlags{.RELEASE_RESOURCES})
-	record_command_buffer(vr.command_buffer, image_index)
+	if result == vk.Result.ERROR_OUT_OF_DATE_KHR {
+		recreate_swap_chain()
+		return
+	} else if result != vk.Result.SUCCESS && result != vk.Result.SUBOPTIMAL_KHR {
+		fmt.println("Failed to acquire swap chain image!")
+	}
+
+	// Only reset the fence if we are submitting work
+	vk.ResetFences(vr.device, 1, &vr.in_flight_fences[current_frame])
+
+	vk.ResetCommandBuffer(vr.command_buffers[current_frame], vk.CommandBufferResetFlags{.RELEASE_RESOURCES})
+	record_command_buffer(vr.command_buffers[current_frame], image_index)
 
 	submit_info: vk.SubmitInfo
 	submit_info.sType = vk.StructureType.SUBMIT_INFO
 	submit_info.waitSemaphoreCount = 1
-	submit_info.pWaitSemaphores = &vr.image_available_semaphore
+	submit_info.pWaitSemaphores = &vr.image_available_semaphores[current_frame]
 	submit_info.pWaitDstStageMask = &vk.PipelineStageFlags{.COLOR_ATTACHMENT_OUTPUT}
 	submit_info.commandBufferCount = 1
-	submit_info.pCommandBuffers = &vr.command_buffer
+	submit_info.pCommandBuffers = &vr.command_buffers[current_frame]
 	submit_info.signalSemaphoreCount = 1
-	submit_info.pSignalSemaphores = &vr.render_finished_semaphore
+	submit_info.pSignalSemaphores = &vr.render_finished_semaphores[current_frame]
 
-	if vk.QueueSubmit(vr.graphics_queue, 1, &submit_info, vr.in_flight_fence) != vk.Result.SUCCESS {
+	if vk.QueueSubmit(vr.graphics_queue, 1, &submit_info, vr.in_flight_fences[current_frame]) != vk.Result.SUCCESS {
 		fmt.println("Failed to submit draw command buffer!")
 	}
 
 	present_info :vk.PresentInfoKHR
 	present_info.sType = vk.StructureType.PRESENT_INFO_KHR
 	present_info.waitSemaphoreCount = 1
-	present_info.pWaitSemaphores = &vr.render_finished_semaphore
+	present_info.pWaitSemaphores = &vr.render_finished_semaphores[current_frame]
 	present_info.swapchainCount = 1
 	present_info.pSwapchains = &vr.swap_chain
 	present_info.pImageIndices = &image_index
 
-	vk.QueuePresentKHR(vr.present_queue, &present_info)
+	result = vk.QueuePresentKHR(vr.present_queue, &present_info)
+
+	if result == vk.Result.ERROR_OUT_OF_DATE_KHR || result == vk.Result.SUBOPTIMAL_KHR {
+		framebuffer_resized = false
+		recreate_swap_chain()
+		/* return */
+	} else if result != vk.Result.SUCCESS {
+		fmt.println("Failed to present swap chain image!")
+	}
+
+	// By using the modulo (%) operator, we ensure that the frame index loops around after every MAX_FRAMES_IN_FLIGHT enqueued frames.
+	current_frame = (current_frame + 1) % MAX_FRAMES_IN_FLIGHT
 
 }
 
 cleanup :: proc() {
-    vk.DestroySemaphore(vr.device, vr.render_finished_semaphore, nil)
-	vk.DestroySemaphore(vr.device, vr.image_available_semaphore, nil)
-    vk.DestroyFence(vr.device, vr.in_flight_fence, nil)
-	vk.DestroyCommandPool(vr.device, vr.command_pool, nil)
+	cleanup_swap_chain()
 	
-	for framebuffer in vr.swap_chain_framebuffers {
-		vk.DestroyFramebuffer(vr.device, framebuffer, nil)
+	for i := 0; i < MAX_FRAMES_IN_FLIGHT; i += 1 {
+		vk.DestroySemaphore(vr.device, vr.render_finished_semaphores[i], nil)
+		vk.DestroySemaphore(vr.device, vr.image_available_semaphores[i], nil)
+		vk.DestroyFence(vr.device, vr.in_flight_fences[i], nil)
 	}
+
+	vk.DestroyCommandPool(vr.device, vr.command_pool, nil)
 	
 	vk.DestroyPipeline(vr.device, vr.graphics_pipeline, nil)
 	vk.DestroyPipelineLayout(vr.device, vr.pipeline_layout, nil)
 	vk.DestroyRenderPass(vr.device, vr.render_pass, nil)
-	
-	for image_view in vr.swap_chain_image_views {
-		vk.DestroyImageView(vr.device, image_view, nil)
-	}
-	
-	vk.DestroySwapchainKHR(vr.device, vr.swap_chain, nil)
+
 	vk.DestroyDevice(vr.device, nil)
 
 	/* if enable_validation_layer { */
