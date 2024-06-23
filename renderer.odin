@@ -8,6 +8,7 @@ import "core:strings"
 import "core:os"
 import win "core:sys/windows"
 import "base:runtime"
+import glm "core:math/linalg/glsl"
 
 
 WIDTH :: 800
@@ -15,6 +16,11 @@ HEIGHT :: 600
 
 MAX_FRAMES_IN_FLIGHT :: 2
 current_frame: u32 = 0
+
+Vertex :: struct {
+	pos:   glm.vec2,
+	color: glm.vec3
+}
 
 VulkanRenderer :: struct {
 	window: glfw.WindowHandle,
@@ -72,6 +78,38 @@ SwapChainSupportDetails :: struct {
 	capatilities: vk.SurfaceCapabilitiesKHR,
 	formats: [dynamic]vk.SurfaceFormatKHR,
 	present_modes: [dynamic]vk.PresentModeKHR,
+}
+
+vertices: []Vertex = {
+	{{0, -0.5}, {1.0, 0.0, 0.0}},
+	{{0.5, 0.5}, {0.0, 1.0, 0.0}},
+	{{-0.5, 0.5}, {0.0, 0.0, 1.0}}
+}
+
+get_binding_description :: proc() -> vk.VertexInputBindingDescription {
+	binding_description: vk.VertexInputBindingDescription
+
+	binding_description.binding = 0 // array index
+	binding_description.stride = size_of(Vertex) // number of bytes to the next
+	binding_description.inputRate = vk.VertexInputRate.VERTEX
+
+	return binding_description
+}
+
+get_attribute_descriptions :: proc() -> [2]vk.VertexInputAttributeDescription {
+	attribute_descriptions: [2]vk.VertexInputAttributeDescription
+
+	attribute_descriptions[0].binding = 0
+	attribute_descriptions[0].location = 0
+	attribute_descriptions[0].format = vk.Format.R32G32_SFLOAT
+	attribute_descriptions[0].offset = 0 // pos offset is 0, check if this is correct
+
+	attribute_descriptions[1].binding = 0
+	attribute_descriptions[1].location = 1
+	attribute_descriptions[1].format = vk.Format.R32G32B32_SFLOAT
+	attribute_descriptions[1].offset = size_of(glm.vec2) // color offset is 8? it should start after the pos, check if this is correct
+
+	return attribute_descriptions
 }
 
 indices_is_complete :: proc (indices: QueueFamilyIndices) -> b32 {
@@ -358,12 +396,15 @@ create_graphics_pipeline :: proc() {
 
 	shaders_stage : []vk.PipelineShaderStageCreateInfo = {vertex_shader_stage_info, frag_shader_stage_info}
 
+	binding_description := get_binding_description()
+	attribute_descriptions := get_attribute_descriptions()
+
 	vertex_input_info: vk.PipelineVertexInputStateCreateInfo
 	vertex_input_info.sType = vk.StructureType.PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
-	vertex_input_info.vertexBindingDescriptionCount = 0
-	vertex_input_info.pVertexBindingDescriptions = nil
-	vertex_input_info.vertexAttributeDescriptionCount = 0
-	vertex_input_info.pVertexAttributeDescriptions = nil
+	vertex_input_info.vertexBindingDescriptionCount = 1
+	vertex_input_info.vertexAttributeDescriptionCount = 1
+	vertex_input_info.pVertexBindingDescriptions = &binding_description
+	vertex_input_info.pVertexAttributeDescriptions = raw_data(attribute_descriptions[:])
 
 	input_assembly: vk.PipelineInputAssemblyStateCreateInfo
 	input_assembly.sType = vk.StructureType.PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO
@@ -438,7 +479,7 @@ create_graphics_pipeline :: proc() {
 	/* color_blending.logicOp = vk.LogicOp.COPY // Optional */
 	color_blending.attachmentCount = 1;
 	color_blending.pAttachments = &color_blend_attachment;
-	/* color_blending.blendConstants[0] = 0.0 // Optional */
+	/* color_blending.blendConstants[1] = 0.0 // Optional */
 	/* color_blending.blendConstants[1] = 0.0 // Optional */
 	/* color_blending.blendConstants[2] = 0.0 // Optional */
 	/* color_blending.blendConstants[3] = 0.0 // Optional */
