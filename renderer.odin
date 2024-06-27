@@ -9,6 +9,7 @@ import "core:os"
 import win "core:sys/windows"
 import "base:runtime"
 import glm "core:math/linalg/glsl"
+import "core:mem"
 
 
 WIDTH :: 800
@@ -17,10 +18,10 @@ HEIGHT :: 600
 MAX_FRAMES_IN_FLIGHT :: 2
 current_frame: u32 = 0
 
-Vertex :: struct {
+/* Vertex :: struct {
 	pos:   glm.vec2,
 	color: glm.vec3
-}
+} */
 
 VulkanRenderer :: struct {
 	window: glfw.WindowHandle,
@@ -41,6 +42,8 @@ VulkanRenderer :: struct {
 	pipeline_layout: vk.PipelineLayout,
 	graphics_pipeline: vk.Pipeline,
 	command_pool: vk.CommandPool,
+	vertex_buffer: vk.Buffer,
+	vertex_buffer_memory: vk.DeviceMemory,
 	command_buffers: [dynamic]vk.CommandBuffer,
 	image_available_semaphores: [dynamic]vk.Semaphore,
 	render_finished_semaphores: [dynamic]vk.Semaphore,
@@ -78,6 +81,11 @@ SwapChainSupportDetails :: struct {
 	capatilities: vk.SurfaceCapabilitiesKHR,
 	formats: [dynamic]vk.SurfaceFormatKHR,
 	present_modes: [dynamic]vk.PresentModeKHR,
+}
+
+Vertex :: struct {
+	pos:   glm.vec2,
+	color: glm.vec3
 }
 
 vertices: []Vertex = {
@@ -278,7 +286,11 @@ record_command_buffer :: proc(command_buffer: vk.CommandBuffer, image_index: u32
 	scissor.extent = vr.swap_chain_extent
 	vk.CmdSetScissor(command_buffer, 0, 1, &scissor)
 
-	vk.CmdDraw(command_buffer, 3, 1, 0, 0)
+	vertex_buffers: []vk.Buffer = {vr.vertex_buffer}
+	offsets: []vk.DeviceSize = {0}
+	vk.CmdBindVertexBuffers(command_buffer, 0, 1, raw_data(vertex_buffers), raw_data(offsets))
+
+	vk.CmdDraw(command_buffer, u32(len(vertices)), 1, 0, 0)
 	vk.CmdEndRenderPass(command_buffer)
 
 	if vk.EndCommandBuffer(command_buffer) != vk.Result.SUCCESS {
@@ -310,6 +322,54 @@ create_command_pool :: proc() {
 	if vk.CreateCommandPool(vr.device, &pool_info, nil, &vr.command_pool) != vk.Result.SUCCESS {
 		fmt.println("Failed to create command pool!")
 	}
+}
+
+create_vertex_buffer :: proc() {
+	buffer_info :vk.BufferCreateInfo
+	buffer_info.sType = vk.StructureType.BUFFER_CREATE_INFO
+	buffer_info.size = vk.DeviceSize(size_of(vertices[0]) * len(vertices))
+	buffer_info.usage = vk.BufferUsageFlags{.VERTEX_BUFFER}
+	buffer_info.sharingMode = vk.SharingMode.EXCLUSIVE
+
+	if vk.CreateBuffer(vr.device, &buffer_info, nil, &vr.vertex_buffer) != vk.Result.SUCCESS {
+		fmt.println("Failed to create vertex buffer")
+	}
+
+	mem_requirements: vk.MemoryRequirements
+	vk.GetBufferMemoryRequirements(vr.device, vr.vertex_buffer, &mem_requirements)
+
+	alloc_info: vk.MemoryAllocateInfo
+	alloc_info.sType = vk.StructureType.MEMORY_ALLOCATE_INFO
+	alloc_info.allocationSize = mem_requirements.size
+	alloc_info.memoryTypeIndex = find_memory_type(mem_requirements.memoryTypeBits, vk.MemoryPropertyFlags{.HOST_VISIBLE, .HOST_COHERENT})
+
+	if vk.AllocateMemory(vr.device, &alloc_info, nil, &vr.vertex_buffer_memory) != vk.Result.SUCCESS {
+		fmt.println("Faield to allocate vertex buffer memory!")
+	}
+
+	vk.BindBufferMemory(vr.device, vr.vertex_buffer, vr.vertex_buffer_memory, 0)
+
+	data: rawptr
+	t:vk.MemoryMapFlags = {}
+	vk.MapMemory(vr.device, vr.vertex_buffer_memory, 0, buffer_info.size, t, &data)
+	
+	mem.copy(data, &vertices, int(buffer_info.size))
+	vk.UnmapMemory(vr.device, vr.vertex_buffer_memory)
+}
+
+
+find_memory_type :: proc(type_filter: u32, properties: vk.MemoryPropertyFlags) -> u32 {
+	mem_properties: vk.PhysicalDeviceMemoryProperties
+	vk.GetPhysicalDeviceMemoryProperties(vr.physical_device, &mem_properties)
+
+	for i :u32 = 0; i < mem_properties.memoryTypeCount; i += 1 {
+		if type_filter & (1 << i) != 0  && (mem_properties.memoryTypes[i].propertyFlags & properties) == properties {
+			return i 
+		}
+	}
+
+	fmt.println("Failed to find suitable memory type!")
+	return 1
 }
 
 
@@ -402,7 +462,7 @@ create_graphics_pipeline :: proc() {
 	vertex_input_info: vk.PipelineVertexInputStateCreateInfo
 	vertex_input_info.sType = vk.StructureType.PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
 	vertex_input_info.vertexBindingDescriptionCount = 1
-	vertex_input_info.vertexAttributeDescriptionCount = 1
+	vertex_input_info.vertexAttributeDescriptionCount = len(attribute_descriptions)
 	vertex_input_info.pVertexBindingDescriptions = &binding_description
 	vertex_input_info.pVertexAttributeDescriptions = raw_data(attribute_descriptions[:])
 
@@ -948,6 +1008,9 @@ draw_frame :: proc () {
 
 cleanup :: proc() {
 	cleanup_swap_chain()
+
+	vk.DestroyBuffer(vr.device, vr.vertex_buffer, nil)
+	vk.FreeMemory(vr.device, vr.vertex_buffer_memory, nil)
 	
 	for i := 0; i < MAX_FRAMES_IN_FLIGHT; i += 1 {
 		vk.DestroySemaphore(vr.device, vr.render_finished_semaphores[i], nil)

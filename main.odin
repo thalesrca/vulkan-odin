@@ -48,6 +48,7 @@ init_vulkan :: proc() {
 	create_graphics_pipeline()
 	create_framebuffers()
 	create_command_pool()
+	create_vertex_buffer()
 	create_command_buffers()
 	create_sync_objects()
 }
